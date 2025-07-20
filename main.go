@@ -2,12 +2,16 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -64,6 +68,57 @@ type config struct {
 	volume     float64
 	pitch      float64
 	output     string
+}
+
+var audioDir string
+
+type CacheKeyPair struct {
+	Key   string
+	Value string
+}
+
+type CacheKey []CacheKeyPair
+
+func (c CacheKey) Len() int           { return len(c) }
+func (c CacheKey) Less(i, j int) bool { return c[i].Key < c[j].Key }
+func (c CacheKey) Swap(i, j int)      { c[i], c[j] = c[j], c[i] }
+
+func generateCacheKey(text string, speakerID int, cfg config) string {
+	cacheKey := CacheKey{
+		{Key: "text", Value: text},
+		{Key: "speakerID", Value: strconv.Itoa(speakerID)},
+		{Key: "speaker", Value: strconv.Itoa(cfg.speaker)},
+		{Key: "style", Value: strconv.Itoa(cfg.style)},
+		{Key: "speed", Value: strconv.FormatFloat(cfg.speed, 'f', -1, 64)},
+		{Key: "intonation", Value: strconv.FormatFloat(cfg.intonation, 'f', -1, 64)},
+		{Key: "volume", Value: strconv.FormatFloat(cfg.volume, 'f', -1, 64)},
+		{Key: "pitch", Value: strconv.FormatFloat(cfg.pitch, 'f', -1, 64)},
+	}
+
+	sort.Sort(cacheKey)
+
+	jsonData, _ := json.Marshal(cacheKey)
+	hasher := sha1.New()
+	hasher.Write(jsonData)
+	return hex.EncodeToString(hasher.Sum(nil))
+}
+
+func getCacheFilePath(hash string) string {
+	return filepath.Join(audioDir, hash+".wav")
+}
+
+func checkCacheDir() error {
+	info, err := os.Stat(audioDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return err
+		}
+		return err
+	}
+	if !info.IsDir() {
+		return os.ErrInvalid
+	}
+	return nil
 }
 
 func getSpeakers(cfg config) Speakers {
@@ -151,6 +206,13 @@ func playback(params *Params, b []byte) error {
 
 func main() {
 	log.SetFlags(log.Lshortfile)
+	
+	// Set audio directory from environment variable or use default
+	audioDir = os.Getenv("VOICEVOX_CLI_AUDIO_DIR")
+	if audioDir == "" {
+		audioDir = "audio"
+	}
+	
 	cfg := config{}
 	flag.StringVar(&cfg.endpoint, "endpoint", "http://localhost:50021", "api endpoint")
 	flag.IntVar(&cfg.speaker, "speaker", 0, "speaker")
@@ -161,6 +223,17 @@ func main() {
 	flag.Float64Var(&cfg.volume, "volume", 1.0, "volume")
 	flag.Float64Var(&cfg.pitch, "pitch", 0.0, "pitch")
 	flag.Parse()
+	
+	if err := checkCacheDir(); err != nil {
+		if os.IsNotExist(err) {
+			log.Fatalf("Audio cache directory does not exist: %s", audioDir)
+		} else if err == os.ErrInvalid {
+			log.Fatalf("%s is not a directory", audioDir)
+		} else {
+			log.Fatalf("Failed to check audio cache directory: %v", err)
+		}
+	}
+	
 	speakers := getSpeakers(cfg)
 	if cfg.speaker >= len(speakers) {
 		log.Fatal("speaker not found")
@@ -171,7 +244,12 @@ func main() {
 	}
 	spkID := spk.Styles[cfg.style].ID
 	log.Println(spk.Name, spk.Styles[cfg.style].Name, spkID)
-	params, err := getQuery(cfg, spkID, strings.Join(flag.Args(), " "))
+	
+	text := strings.Join(flag.Args(), " ")
+	cacheHash := generateCacheKey(text, spkID, cfg)
+	cacheFilePath := getCacheFilePath(cacheHash)
+	
+	params, err := getQuery(cfg, spkID, text)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -179,12 +257,28 @@ func main() {
 	params.PitchScale = cfg.pitch
 	params.IntonationScale = cfg.intonation
 	params.VolumeScale = cfg.volume
-	b, err := synth(cfg, spkID, params)
-	if err != nil {
-		log.Fatal(err)
+	
+	var b []byte
+	if _, err := os.Stat(cacheFilePath); err == nil {
+		log.Println("Using cached audio:", cacheHash)
+		b, err = os.ReadFile(cacheFilePath)
+		if err != nil {
+			log.Fatal("Failed to read cache file:", err)
+		}
+	} else {
+		log.Println("Generating new audio")
+		b, err = synth(cfg, spkID, params)
+		if err != nil {
+			log.Fatal(err)
+		}
+		
+		if err := os.WriteFile(cacheFilePath, b, 0644); err != nil {
+			log.Println("Failed to write cache file:", err)
+		}
 	}
+	
 	if len(cfg.output) > 0 {
-		if err := ioutil.WriteFile(cfg.output, b, 0644); err != nil {
+		if err := os.WriteFile(cfg.output, b, 0644); err != nil {
 			log.Fatal(err)
 		}
 	} else {
