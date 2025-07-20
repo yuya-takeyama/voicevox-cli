@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ebitengine/oto/v3"
 )
@@ -209,8 +210,10 @@ func playback(params *Params, b []byte) error {
 	
 	p.Play()
 	
+	// Wait for playback to complete
 	for p.IsPlaying() {
-		// Wait for playback to complete
+		// Small sleep to avoid busy waiting
+		time.Sleep(10 * time.Millisecond)
 	}
 	
 	return nil
