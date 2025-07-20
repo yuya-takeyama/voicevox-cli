@@ -15,7 +15,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/hajimehoshi/oto"
+	"github.com/ebitengine/oto/v3"
 )
 
 type Params struct {
@@ -189,18 +189,30 @@ func playback(params *Params, b []byte) error {
 	if params.OutputStereo {
 		ch = 2
 	}
-	ctx, err := oto.NewContext(params.OutputSamplingRate, ch, 2, 3200)
+	
+	op := &oto.NewContextOptions{
+		SampleRate:   params.OutputSamplingRate,
+		ChannelCount: ch,
+		Format:       oto.FormatSignedInt16LE,
+	}
+	
+	ctx, readyChan, err := oto.NewContext(op)
 	if err != nil {
 		return err
 	}
-	defer ctx.Close()
-	p := ctx.NewPlayer()
-	if _, err := io.Copy(p, bytes.NewReader(b)); err != nil {
-		return err
+	defer ctx.Suspend()
+	
+	<-readyChan
+	
+	p := ctx.NewPlayer(bytes.NewReader(b))
+	defer p.Close()
+	
+	p.Play()
+	
+	for p.IsPlaying() {
+		// Wait for playback to complete
 	}
-	if err := p.Close(); err != nil {
-		return err
-	}
+	
 	return nil
 }
 
